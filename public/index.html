@@ -1,0 +1,416 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Video Streaming</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <div id="loader"><img src="Walk.gif" alt=""></div>
+  <div id="controls">
+    <input type="text" id="username" placeholder="Enter your username">
+    <button id="startButton">Start Video Stream</button>
+    <button id="nextButton" style="display:none;">Next</button>
+    <button id="shareScreenButton" style="display:block;">Share Screen</button>
+    <input type="file" name="file" id="fileUpload" accept=".gif, .jpeg, .jpg, .png, .zip, .rar"
+      onchange="uploadPicture()" />
+
+  </div>
+
+  <div id="videoContainer">
+    <div id="mainVideoGrid1">
+      <span class="username"></span>
+      <video></video>
+
+    </div>
+    <div id="mainVideoGrid2">
+      <span class="username"></span>
+      <video></video>
+    </div>
+  </div>
+  </div>
+
+
+
+  <div id="chatContainer">
+    <div id="chatBox">
+      <div id="messages"></div>
+      <input type="text" id="messageInput" placeholder="Type a message...">
+      <button id="sendButton">Send</button>
+    </div>
+  </div>
+
+
+
+
+
+  <div id="logs"></div>
+
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://unpkg.com/simple-peer@9.10.0/simplepeer.min.js"></script>
+
+  <script>
+    const socket = io({ secure: true });
+    const logsContainer = document.getElementById('logs');
+    const peers = {};
+    let socketuser_id;
+    let room_user;
+    let next_username;
+    let currentStream;
+    let screenStream;
+
+
+    document.getElementById('nextButton').style.display = 'none';
+    document.getElementById('loader').style.display = 'none';
+
+
+    const addLog = (message) => {
+      const logElement = document.createElement('div');
+      logElement.classList.add('log');
+      logElement.textContent = message;
+      logsContainer.appendChild(logElement);
+      logsContainer.scrollTop = logsContainer.scrollHeight;
+    };
+
+    const addVideoStream = (gridId, stream, username) => {
+      // for loader
+      document.getElementById('loader').style.display = 'block';
+
+      const mainVideoGrid = document.getElementById(gridId);
+
+      const video = mainVideoGrid.getElementsByTagName('video')[0]; // Access the first video element
+      if (video) {
+        video.srcObject = stream;
+        video.addEventListener('loadedmetadata', () => {
+          video.play();
+        });
+      } else {
+        console.error('Video element not found in the grid:', gridId);
+      }
+
+      const usernameDiv = mainVideoGrid.getElementsByTagName('span')[0]; // Access the first span element
+      if (usernameDiv) {
+        usernameDiv.innerText = username;
+      } else {
+        console.error('Username span element not found in the grid:', gridId);
+      }
+    };
+
+
+    const startVideoStream = () => {
+      const username = document.getElementById('username').value || 'Anonymous';
+      next_username = username;
+      addLog(`Starting video stream as ${username}`);
+      document.getElementById('loader').style.display = 'block';
+
+      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+        navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+          .then(stream => {
+            addLog('Accessed media devices successfully.');
+            addVideoStream('mainVideoGrid1', stream, username);
+
+            // next button visible
+            document.getElementById('nextButton').style.display = 'block';
+
+            currentStream = stream;
+
+            // for Loader
+            document.getElementById('loader').style.display = 'none';
+
+            socket.emit('join-room', null, socket.id, username);
+            addLog(`Joined room`);
+
+            socket.on('join-room', (newRoomId, socketUserId, username) => {
+              socket.emit('join-room', newRoomId, socketUserId, username);
+            });
+
+            socketuser_id = socket.id;
+
+            socket.on('user-connected', (userId, remoteUsername) => {
+              addLog(`${remoteUsername} connected.`);
+              connectToNewUser(userId, stream, remoteUsername);
+            });
+
+            socket.on('user-disconnected', userId => {
+              addLog(`User disconnected: ${userId}`);
+              if (peers[userId]) peers[userId].close();
+            });
+
+            socket.on('room-full', () => {
+              addLog('Room is full.');
+            });
+
+            socket.on('room-joined', (joined) => {
+              addLog('User joined the room.', joined);
+            });
+
+            socket.on("room-created", (roomId) => {
+              room_user = roomId;
+            });
+
+            socket.on('signal', data => {
+              const peer = peers[data.userId];
+              if (peer) {
+                peer.signal(data.signal);
+              } else {
+                addLog(`Received signal from ${data.username}`);
+                 // for Loader
+                  document.getElementById('loader').style.display = 'block';
+                connectToNewUser(data.userId, stream, data.username, false, data.signal);
+                 // for Loader
+                  document.getElementById('loader').style.display = 'none';
+
+              }
+            });
+
+
+            const connectToNewUser = (userId, stream, remoteUsername, initiator = true, receivedSignal = null) => {
+              const peer = new SimplePeer({
+                initiator: initiator,
+                trickle: false,
+                streams: [stream] // Only add the initial stream
+              });
+
+
+          
+              peer.on('signal', signal => {
+                socket.emit('signal', { userId, signal, username });
+                addLog(`Sending signal to ${remoteUsername}`);
+              });
+
+              peer.on('stream', userVideoStream => {
+                addVideoStream('mainVideoGrid2', userVideoStream, remoteUsername);
+              });
+
+              peer.on('track', (track, stream) => {
+                if (track.kind === 'video' && stream.getVideoTracks().length > 1) {
+                  // Assuming the second video track is the screen share stream
+                  addScreenShareStream('ShareScreen', stream);
+                }
+              });
+
+              peer.on('close', () => {
+                addLog(`Connection closed with ${remoteUsername}`);
+                if (peers[userId]) {
+                  delete peers[userId];
+                }
+              });
+
+              if (receivedSignal) {
+                peer.signal(receivedSignal);
+              }
+
+
+              peers[userId] = peer;
+              peer.on('error', err => console.error('Peer error:', err));
+            };
+          })
+
+      } else {
+        addLog('getUserMedia is not supported in your browser.');
+        alert('getUserMedia is not supported in your browser.');
+      }
+    };
+
+    document.getElementById('startButton').addEventListener('click', startVideoStream);
+
+
+
+
+    socket.on('room-full', () => {
+      alert('This room is full. Please try joining another room.');
+
+      disconnectFromCurrentRoom();
+    });
+
+    socket.on('room-created', (newRoomId) => {
+      room_user = newRoomId;
+      addLog(`Room created: ${newRoomId}`);
+
+    });
+
+    const disconnectFromCurrentRoom = () => {
+      if (currentStream) {
+        currentStream.getTracks().forEach(track => track.stop());
+      }
+
+      for (let peerId in peers) {
+        peers[peerId].destroy();
+        delete peers[peerId];
+      }
+
+      socket.emit('leave-room', room_user, socketuser_id, next_username);
+      addLog('Left the room');
+    };
+
+
+    // Next functionality
+    document.getElementById('nextButton').addEventListener('click', () => {
+       // for Loader
+       document.getElementById('loader').style.display = 'block';
+
+      disconnectFromCurrentRoom();
+      socket.emit('next', room_user, socketuser_id, next_username);
+       // for Loader
+       document.getElementById('loader').style.display = 'none';
+
+    });
+
+
+
+    // Chat functionality
+    const messageInput = document.getElementById('messageInput');
+    const sendButton = document.getElementById('sendButton');
+    const messagesContainer = document.getElementById('messages');
+
+    sendButton.addEventListener('click', () => {
+      const message = messageInput.value;
+      if (message.trim()) {
+        addMessage('You', message);
+        socket.emit('send-message', message, room_user);
+        messageInput.value = '';
+      }
+    });
+
+    socket.on('receive-message', message => {
+      addMessage('Other', message);
+    });
+
+    const addMessage = (sender, message) => {
+      const messageElement = document.createElement('div');
+      messageElement.classList.add('message');
+      messageElement.innerHTML = `<strong>${sender}:</strong> ${message}`;
+      messagesContainer.appendChild(messageElement);
+      messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    };
+
+
+    //Logic for ShareScreen
+
+    let peerScreen;
+    // Function to replace track using WebRTC API
+    function replaceTrack(peer, newTrack) {
+      const sender = peer._pc.getSenders().find(s => s.track && s.track.kind === newTrack.kind);
+      if (sender) {
+        console.log("Replacing track:", sender.track.id, "with new track:", newTrack.id);
+        sender.replaceTrack(newTrack).then(() => {
+          console.log("Track replaced successfully");
+        }).catch(error => {
+          console.error("Error replacing track:", error);
+        });
+      } else {
+        console.error("Sender not found");
+      }
+    }
+
+    // Start screen sharing
+    function startScreenShare() {
+      navigator.mediaDevices.getDisplayMedia({ video: true })
+        .then(screenStream => {
+          const screenTrack = screenStream.getVideoTracks()[0];
+          for (let peerId in peers) {
+            peerScreen = peers[peerId];
+          }
+          replaceTrack(peerScreen, screenTrack);
+          screenTrack.onended = () => {
+            console.log("Screen sharing ended. Reverting to local camera stream.");
+            replaceTrack(peerScreen, currentStream.getVideoTracks()[0]);
+          };
+        })
+        .catch(error => {
+          console.error('Error accessing screen sharing:', error);
+        });
+    }
+
+    // Event listener for screen share button
+    document.getElementById('shareScreenButton').addEventListener('click', () => {
+      startScreenShare();
+    });
+
+
+
+    // File Sharing
+    function uploadPicture() {
+      var fileInput = document.getElementById('fileUpload');
+      var file = fileInput.files[0];
+
+      // File type validation
+      var allowedTypes = ['image/gif', 'image/jpeg', 'image/png', 'application/x-zip-compressed', 'application/x-rar-compressed'];
+      console.log("file type:", file.type)
+
+      if (!allowedTypes.includes(file.type)) {
+        alert('Invalid file type. Only GIF, JPEG, PNG, ZIP, and RAR files are allowed.');
+        fileInput.value = ''; // Clear the input
+        return;
+      }
+
+
+      // File size validation (for example, limit to 1GB)
+      var maxSize = 1 * 1024 * 1024;
+      if (file.size > maxSize) {
+        alert('File size exceeds the limit of 1GB.');
+        fileInput.value = ''; // Clear the input
+        return;
+      }
+
+      var FD = new FormData();
+      FD.append('file', file);
+
+      // Logging the file data for verification
+      for (var pair of FD.entries()) {
+        console.log(pair[0], pair[1]);
+      }
+
+
+      //logic for File Sharing
+      var reader = new FileReader();
+
+      reader.onload = function (event) {
+        var fileData = event.target.result;
+        socket.emit("send_message", {
+          type: 'attachment',
+          fileName: file.name,
+          fileType: file.type,
+          data: fileData,
+          roomdata: room_user
+        }, (result) => {
+          alert("Server has received file!")
+        });
+      };
+      reader.readAsArrayBuffer(file);
+
+      // Optional: Log the file data for verification
+      console.log('Sending file:', file.name);
+    }
+
+    socket.on("fileshare", (data) => {
+      let container = document.createElement("li");
+      let anchor = document.createElement("a");
+      let messageElement = document.getElementById("messages");
+      if (messageElement) {
+        messageElement.appendChild(container);
+        container.innerText = `Received file: ${data.fileName}`;
+
+        // Create a Blob from the received data
+        let blob = new Blob([data.data], { type: data.fileType });
+        let url = URL.createObjectURL(blob);
+
+        anchor.innerText = "Download";
+        anchor.href = url;
+        anchor.download = data.fileName;
+        container.appendChild(anchor);
+
+        console.log("Received file data:", data);
+      } else {
+        console.error("Element with ID 'messages' not found.");
+      }
+    });
+
+  </script>
+</body>
+
+</html>
